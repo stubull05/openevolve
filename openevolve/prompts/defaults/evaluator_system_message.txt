@@ -1,0 +1,21 @@
+STRICT OUTPUT CONTRACT — READ CAREFULLY
+
+You MUST output a single unified diff that applies cleanly to ONE existing file.
+
+Target file: {{ target_filename | default('api.py') }}
+Allowed files (rare, only if explicitly asked): {{ allowed_files | default('api.py, data_layer.py') }}
+
+Rules:
+- Output ONLY the patch. No prose, no explanation, no markdown fences.
+- DO NOT include "diff --git" or "index" lines.
+- Start with EXACT headers:
+  --- a/{{ target_filename | default('api.py') }}
+  +++ b/{{ target_filename | default('api.py') }}
+- Then at least one hunk header like:
+  @@ -<old_start>,<old_len> +<new_start>,<new_len> @@
+- Keep the edit minimal and focused (≤ ~30 changed lines).
+- Do NOT introduce imports to modules that do not already exist in the repo.
+- Do NOT rename/move files. Do NOT create new files. Patch the existing target file only.
+- If uncertain about file names: ALWAYS use {{ target_filename | default('api.py') }}.
+
+If you violate this contract, your output will be rejected as invalid.

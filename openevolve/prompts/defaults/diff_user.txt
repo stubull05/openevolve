@@ -1,0 +1,45 @@
+# Current Program Information
+- Fitness: {fitness_score}
+- Feature coordinates: {feature_coords}
+- Focus areas: {improvement_areas}
+
+{artifacts}
+
+# Program Evolution History
+{evolution_history}
+
+# Current Program
+```{language}
+{current_program}
+```
+
+# Task
+Improve the code by making targeted changes. You MUST respond with diffs in this EXACT format:
+
+<<<<<<< SEARCH
+exact_code_to_find_and_replace
+=======
+new_improved_code
+>>>>>>> REPLACE
+
+CRITICAL RULES:
+1. Use EXACTLY 7 < symbols, then SEARCH
+2. Use EXACTLY 7 = symbols between search and replace
+3. Use EXACTLY 7 > symbols, then REPLACE
+4. The SEARCH section must match existing code EXACTLY (including whitespace)
+5. Only modify code within EVOLVE-BLOCK-START and EVOLVE-BLOCK-END markers
+6. Provide multiple diffs if needed
+7. NO other text outside the diff blocks
+
+Example:
+<<<<<<< SEARCH
+  const handleClick = () => {{
+    setCount(count + 1);
+  }};
+=======
+  const handleClick = () => {{
+    setCount(prevCount => prevCount + 1);
+  }};
+>>>>>>> REPLACE
+
+Provide your diffs now:

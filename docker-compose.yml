@@ -1,0 +1,50 @@
+services:
+  openevolve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    tmpfs:
+      - /home/app/.local
+    image: openevolve:dev
+    container_name: openevolve
+    # The Dockerfile sets WORKDIR=/workspace. Keep it here so both repos are siblings.
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    shm_size: "1gb"  # helps Chromium/Playwright
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # ensures host alias works on Docker Desktop/Linux backend
+
+    environment:
+      # Your local proxy/base (matches your logs)
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:8000/v1}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-http://host.docker.internal:8000/v1}  # for your app, mapped to BASE_URL above
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      PRIMARY_MODEL: ${PRIMARY_MODEL:-qwen2.5-coder:7b}
+      SECONDARY_MODEL: ${SECONDARY_MODEL:-qwen2.5-coder:7b}
+      PYTHONNOUSERSITE: "1"  # Python ignores ~/.local
+      PIP_USER: "no"         # pip won’t do --user installs
+      VENV_DIR: "/workspace/.venv"
+      # App knobs
+      ITERATIONS: ${ITERATIONS:-20}
+      PYTHONUNBUFFERED: "1"
+      # Allow tests/evaluator to import your target code directly
+      PYTHONPATH: /workspace/target
+      TARGET_REPO_HOST_PATH: C:\\Source\\GIT\\Rysky
+    volumes:
+      # Your OpenEvolve repo (MUST be rw so editable installs / egg-info don’t fail)
+      - "C:\\Source\\GIT\\openevolve:/workspace/openevolve:rw"
+
+      # Your target project the system evolves/tests
+      - "C:\\Source\\GIT\\Rysky:/workspace/target:rw"
+
+      # Always run the latest entrypoint without rebuilds
+      - "./entrypoint.sh:/usr/local/bin/entrypoint.sh:ro"
+
+      # Optional: drop any missing templates here (e.g. evolution_history.jinja)
+      # If the package data misses them, this overrides the path your stack is looking at
+      - "./templates:/home/app/.local/lib/python3.13/site-packages/openevolve/prompt/templates:ro"
+      
+    # Dockerfile already sets ENTRYPOINT, but we pin it here so the bind-mount is used.
+    entrypoint: ["/bin/bash", "/usr/local/bin/entrypoint.sh"]

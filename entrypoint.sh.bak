@@ -1,0 +1,113 @@
+﻿#!/usr/bin/env sh
+set -eu
+
+log() { printf '%s\n' "$*" >&2; }
+
+# Ensure user-local bin is on PATH (pip may install there as non-root)
+export PATH="${HOME}/.local/bin:${PATH}"
+
+log "[entrypoint] OPENAI_API_BASE=${OPENAI_API_BASE:-<unset>}"
+
+# ---- Install openevolve from container-local copy (non-editable) ----
+SRC="/workspace/openevolve"
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openevolve"
+STAMP="${STATE_DIR}/src.sha256"
+INSTALLED="${STATE_DIR}/installed.ok"
+
+mkdir -p "${STATE_DIR}"
+
+# Hash key project files to detect source changes quickly
+hash_files() {
+  # Concatenate hashes of known metadata files if present, then hash that list
+  (
+    [ -f "$SRC/pyproject.toml" ] && sha256sum "$SRC/pyproject.toml" || true
+    [ -f "$SRC/setup.cfg" ]       && sha256sum "$SRC/setup.cfg"       || true
+    [ -f "$SRC/setup.py" ]        && sha256sum "$SRC/setup.py"        || true
+  ) | awk '{print $1}' | sha256sum | awk '{print $1}'
+}
+
+if [ -d "$SRC" ]; then
+  CURR_HASH="$(hash_files || echo "")"
+  PREV_HASH="$( [ -f "$STAMP" ] && cat "$STAMP" || echo "" )"
+
+  if [ ! -f "$INSTALLED" ] || [ "$CURR_HASH" != "$PREV_HASH" ]; then
+    TMP_DIR="$(mktemp -d /tmp/openevolve-src.XXXXXX)"
+    log "[entrypoint] Installing openevolve from source (non-editable)…"
+    # Copy the tree to a writeable location (avoid writing into the bind mount)
+    cp -a "$SRC"/. "$TMP_DIR"/
+    # Non-editable install: into site-packages (or user site if not writable)
+    python -m pip install --no-cache-dir "$TMP_DIR"
+    # --- After: python -m pip install --no-cache-dir "$TMP_DIR"
+# Ensure templates exist inside installed package (workaround for missing package_data)
+python - <<'PY'
+import importlib, os, shutil, sys
+from pathlib import Path
+
+# Where the package was installed
+op = importlib.import_module("openevolve")
+pkg_dir = Path(op.__file__).parent
+want = pkg_dir / "prompt" / "templates"
+
+# Source templates from the bind-mounted repo (read-only is fine)
+src = Path("/workspace/openevolve/openevolve/prompt/templates")
+
+if not want.exists():
+    if src.exists():
+        want.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, want)
+        print(f"[entrypoint] Copied templates into {want}")
+    else:
+        print("[entrypoint] WARNING: templates directory not found in source; cannot seed.")
+else:
+    # Optional: ensure evolution_history is present
+    target = want / "evolution_history"
+    if not target.exists():
+        candidates = list(src.glob("evolution_history*"))
+        if candidates:
+            shutil.copy2(candidates[0], target)
+            print(f"[entrypoint] Seeded missing {target.name}")
+        else:
+            print("[entrypoint] WARNING: evolution_history not found in source templates.")
+PY
+
+    # Persist state for next boot
+    [ -n "$CURR_HASH" ] && printf '%s' "$CURR_HASH" > "$STAMP"
+    : > "$INSTALLED"
+    # Best effort cleanup
+    rm -rf "$TMP_DIR" || true
+    log "[entrypoint] openevolve installed."
+  else
+    log "[entrypoint] openevolve source unchanged; skipping install."
+  fi
+else
+  log "[entrypoint] WARN: $SRC not found (is the volume mounted?)"
+fi
+
+# ---- Command dispatch ----
+if [ "$#" -gt 0 ]; then
+  # Respect explicit CMD/args from docker/compose
+  exec "$@"
+fi
+
+# If OE_* vars are present, run the app’s CLI; else run tests as a smoke check
+if [ -n "${OE_INITIAL:-}" ] && [ -n "${OE_EVAL:-}" ]; then
+  log "[entrypoint] Launching openevolve-run…"
+  exec openevolve-run "$OE_INITIAL" "$OE_EVAL" \
+    ${OE_ITERATIONS:+--iterations "$OE_ITERATIONS"} \
+    ${OE_TARGET_SCORE:+--target-score "$OE_TARGET_SCORE"} \
+    ${OE_LOG_LEVEL:+--log-level "$OE_LOG_LEVEL"} \
+    ${OE_API_BASE:+--api-base "$OE_API_BASE"} \
+    ${OE_PRIMARY_MODEL:+--primary-model "$OE_PRIMARY_MODEL"} \
+    ${OE_SECONDARY_MODEL:+--secondary-model "$OE_SECONDARY_MODEL"}
+else
+  # Default smoke test path (adjust if your tests live elsewhere)
+  TEST_PATH="/workspace/target/tests"
+  if [ -d "$TEST_PATH" ]; then
+    log "[entrypoint] OE_INITIAL/OE_EVAL not set. Running pytest fallback."
+    exec pytest -q "$TEST_PATH"
+  else
+    log "[entrypoint] No command and no tests found at $TEST_PATH; sleeping."
+    exec tail -f /dev/null
+  fi
+fi
+

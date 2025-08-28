@@ -1,0 +1,17 @@
+services:
+  openevolve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      OPENAI_API_BASE: http://host.docker.internal:8000/v1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PYTHONPATH: "/workspace"
+      # Optional overrides:
+      # INITIAL_PROGRAM: /workspace/target/api.py
+      # EVAL_FILE: /workspace/openevolve/evaluation.py
+    volumes:
+      - ../Rysky:/workspace/target:rw
+      - ./:/workspace
+      # If you want the login test to run:
+      # - ./playwright-tests:/opt/playwright/tests:ro      

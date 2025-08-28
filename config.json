@@ -1,0 +1,12 @@
+{
+  "repo_path": "/workspace/target",
+  "test_command": "/workspace/openevolve/run_tests.sh",
+  "population_size": 6,
+  "generations": null,
+  "mutation_targets": ["**/*.py", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.json", "**/*.sql", "**/*.md"],
+  "exclude": [".git/**", "node_modules/**", "**/__pycache__/**", ".venv/**", "venv/**"],
+  "selection_strategy": "tournament",
+  "mutation_rate": 0.3,
+  "crossover_rate": 0.2,
+  "fitness_metric": "tests_pass"
+}

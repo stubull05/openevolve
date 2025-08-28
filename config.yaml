@@ -1,0 +1,42 @@
+# OpenEvolve config for Rysky + Ollama
+max_iterations: 1000
+checkpoint_interval: 10
+random_seed: 42
+diff_based_evolution: false
+
+llm:
+  api_base: "http://host.docker.internal:8000/v1"
+  models:
+    - name: "qwen2.5-coder:7b"
+      weight: 1.0
+  temperature: 0.02
+  top_p: 0.95
+  max_tokens: 2048
+  timeout: 900
+  retries: 2
+  evaluator_models:
+    - name: "qwen2.5-coder:7b"
+      weight: 1.0
+
+database:
+  population_size: 64
+  num_islands: 3
+  migration_interval: 10
+  feature_dimensions: ["complexity", "diversity"]
+
+evaluator:
+  timeout: 950
+  enable_artifacts: true
+  cascade_evaluation: false
+  use_llm_feedback: false
+
+prompt:
+  system_message: "You are a repo-evolution agent for the Rysky trading app; you are given one target file path and its full contents; rewrite ONLY that file and output ONLY the complete file contents with no code fences, no headers, no commentary, and in the same language/extension as the target (e.g., .js stays JS/JSX, .py stays Python); keep imports/resolution valid; prefer minimal, test-driven changes that improve evaluator scores."
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+  max_artifact_bytes: 4096
+  artifact_security_filter: true
+  template_dir: null
+  use_template_stochasticity: false
+  template_variations: {}

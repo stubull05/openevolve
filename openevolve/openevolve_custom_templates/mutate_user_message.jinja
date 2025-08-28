@@ -1,0 +1,9 @@
+Improve the program to increase test scores. Produce a single unified diff for {{ target_filename | default('api.py') }} ONLY.
+
+Remember:
+- NO markdown fences.
+- NO "diff --git" / "index" lines.
+- Start with:
+  --- a/{{ target_filename | default('api.py') }}
+  +++ b/{{ target_filename | default('api.py') }}
+- Provide one focused change (≤ ~30 changed lines).

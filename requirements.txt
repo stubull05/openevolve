@@ -1,0 +1,9 @@
+pytest>=8.2.0
+duckdb>=0.10.3
+requests>=2.31.0
+openai>=1.30.0
+yfinance>=0.2.43
+pytz>=2024.1
+gitpython>=3.1.30
+flask-cors
+pyyaml>=6.0.2

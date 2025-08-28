@@ -1,0 +1,19 @@
+﻿{# evolution_history.jinja #}
+{% if previous_programs %}
+Previous programs:
+{% for p in previous_programs %}
+- ID: {{ p.id }} | score: {{ "%.4f"|format(p.metrics.combined_score|default(0.0)) }}
+  ```
+{{ p.code }}
+  ```
+{% endfor %}
+{% else %}
+No prior programs yet. Start from the seed program.
+{% endif %}
+
+{% if top_programs %}
+Top candidates:
+{% for p in top_programs %}
+- ID: {{ p.id }} | score: {{ "%.4f"|format(p.metrics.combined_score|default(0.0)) }}
+{% endfor %}
+{% endif %}

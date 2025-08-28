@@ -1,0 +1,56 @@
+# OpenEvolve config for Rysky trading app evolution
+max_iterations: 25
+checkpoint_interval: 5
+random_seed: 42
+diff_based_evolution: true
+language: "javascript"
+
+llm:
+  api_base: "http://localhost:11434/v1"
+  api_key: "not-needed"
+  models:
+    - name: "qwen2.5-coder:7b"
+      weight: 1.0
+      api_key: "not-needed"
+  temperature: 0.3
+  top_p: 0.9
+  max_tokens: 8192
+  timeout: 120
+  retries: 3
+
+
+database:
+  population_size: 20
+  num_islands: 3
+  migration_interval: 5
+  feature_dimensions: ["complexity", "diversity"]
+
+evaluator:
+  timeout: 60
+  enable_artifacts: false
+  cascade_evaluation: false
+  use_llm_feedback: false
+
+prompt:
+  system_message: |
+    You are an expert React/JavaScript developer working on the Rysky trading application.
+    
+    CRITICAL INSTRUCTIONS:
+    1. You MUST only modify code between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END markers
+    2. Keep all imports, exports, and overall structure intact
+    3. Focus on improving the marked sections only
+    
+    Improvements to make:
+    - Fix syntax errors and bugs
+    - Improve React hooks usage (useState, useEffect, etc.)
+    - Add better error handling with try/catch
+    - Optimize performance and reduce re-renders
+    - Add proper TypeScript-style prop validation
+    - Improve accessibility and user experience
+    
+    Return the COMPLETE file with your improvements in the marked sections.
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+  max_artifact_bytes: 4096
+  artifact_security_filter: true

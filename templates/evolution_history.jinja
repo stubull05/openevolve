@@ -1,0 +1,40 @@
+﻿{# openevolve/prompt/templates/evolution_history.jinja #}
+
+### Evolution History  (Language: {{ language|default('unknown') }})
+
+{% if feature_dimensions %}
+**Feature dimensions:** {{ feature_dimensions | join(', ') }}
+{% endif %}
+
+{% if previous_programs and previous_programs|length > 0 %}
+#### Previous Programs
+{% for p in previous_programs %}
+- [{{ loop.index }}] id: {{ p.id | default('unknown') }}
+  {% if p.metrics %}score: {{ p.metrics.combined_score | default('n/a') }}, {% endif %}length: {{ p.length | default('n/a') }}
+  code:
+{{ (p.code | default(p.source | default(''))) | indent(4) }}
+{% endfor %}
+{% else %}
+_No previous programs._
+{% endif %}
+
+{% if top_programs and top_programs|length > 0 %}
+#### Top Programs
+{% for p in top_programs %}
+- [{{ loop.index }}] id: {{ p.id | default('unknown') }}
+  {% if p.metrics %}score: {{ p.metrics.combined_score | default('n/a') }}, {% endif %}length: {{ p.length | default('n/a') }}
+  code:
+{{ (p.code | default(p.source | default(''))) | indent(4) }}
+{% endfor %}
+{% else %}
+_No top programs yet._
+{% endif %}
+
+{% if inspirations and inspirations|length > 0 %}
+#### Inspirations
+{% for idea in inspirations %}
+- {{ idea }}
+{% endfor %}
+{% else %}
+_No inspirations provided._
+{% endif %}

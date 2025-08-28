@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+FROM python:3.13-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/home/app/.local/bin:${PATH}"
+
+# --- OS deps + Node.js 20 + Playwright (single layer) ---
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      bash curl ca-certificates git xvfb gnupg \
+      fonts-unifont \
+      libnss3 libatk-bridge2.0-0 \
+      libx11-6 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 \
+      libdrm2 libgbm1 libgtk-3-0 libglib2.0-0 libcairo2 libpango-1.0-0 \
+      libasound2 libxshmfence1; \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends nodejs; \
+    npm i -g npm@11.5.2 @playwright/test@1.46.0 playwright@1.46.0; \
+    npx playwright install --with-deps chromium; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- Python deps (system-wide) ---
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir \
+      pytest duckdb requests openai yfinance Flask Flask-Cors Flask-SocketIO simple-websocket
+
+# --- Playwright config & tests into image (path used by your harness) ---
+WORKDIR /opt/playwright
+COPY playwright/playwright.config.ts /opt/playwright/playwright.config.ts
+COPY playwright/tests /opt/playwright/tests
+
+# --- Workspace ---
+WORKDIR /workspace
+RUN mkdir -p /workspace
+
+# --- Entry point (set mode at copy-time; no separate chmod layer) ---
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# --- Non-root user ---
+RUN useradd -m app && chown -R app:app /workspace /opt/playwright
+USER app
+
+# --- Defaults (override via compose) ---
+ENV OPENAI_API_BASE=http://host.docker.internal:8000/v1 \
+    OPENAI_API_KEY=changeme \
+    ITERATIONS=20
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

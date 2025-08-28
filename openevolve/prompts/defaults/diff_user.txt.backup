@@ -1,0 +1,25 @@
+# Current Program Information
+- Fitness: {fitness_score}
+- Feature coordinates: {feature_coords}
+- Focus areas: {improvement_areas}
+
+{artifacts}
+
+# Program Evolution History
+{evolution_history}
+
+# Current Program
+```{language}
+{current_program}
+```
+
+# Task
+You must respond with ONLY diffs in this exact format. No other text allowed.
+
+exact_code_from_current_program
+
+Example:
+def old_func():
+    return 1
+
+Provide your diffs now:
