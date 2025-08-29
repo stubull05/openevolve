@@ -360,6 +360,9 @@ OE_RUN_MODE="${OE_RUN_MODE:-evolve}"                # evolve | pytest | idle
 OPENAI_API_BASE="${OPENAI_API_BASE:-http://host.docker.internal:8000/v1}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-ollama}"          # local OpenAI-compatible servers ignore it
 
+# CRITICAL FIX: Set evaluation behavior to persist successful evolutions
+EVAL_PERSIST_CHANGES="${EVAL_PERSIST_CHANGES:-1}"   # 1=persist successful changes, 0=never persist
+
 # Also load a .env inside the target repo if present (can override the above)
 if [[ -f "${OE_REPO_DIR}/.env" ]]; then
   set -a
@@ -371,9 +374,10 @@ fi
 # Strip any stray CRs (Windows line endings) from critical vars
 OE_RUN_MODE="${OE_RUN_MODE//$'\r'/}"
 OPENAI_API_BASE="${OPENAI_API_BASE//$'\r'/}"
+EVAL_PERSIST_CHANGES="${EVAL_PERSIST_CHANGES//$'\r'/}"
 
 # Export final values
-export OE_REPO_DIR OE_TARGET_FILE OE_ITERATIONS OE_RUN_MODE OPENAI_API_BASE OPENAI_API_KEY
+export OE_REPO_DIR OE_TARGET_FILE OE_ITERATIONS OE_RUN_MODE OPENAI_API_BASE OPENAI_API_KEY EVAL_PERSIST_CHANGES
 
 # Normalize & validate OE_RUN_MODE (trim trailing tokens/whitespace)
 OE_RUN_MODE="${OE_RUN_MODE%%[[:space:]]*}"
@@ -390,6 +394,7 @@ log "[entrypoint] OE_TARGET_FILE=${OE_TARGET_FILE}"
 log "[entrypoint] OE_RUN_MODE=${OE_RUN_MODE}"
 log "[entrypoint] OPENAI_API_BASE=${OPENAI_API_BASE}"
 log "[entrypoint] OPENAI_API_KEY=$([[ -n "${OPENAI_API_KEY:-}" ]] && echo "<set>" || echo "<unset>")"
+log "[entrypoint] EVAL_PERSIST_CHANGES=${EVAL_PERSIST_CHANGES} (1=persist successful changes, 0=never persist)"
 
 # Optional non-fatal probe of model server (helps catch wrong port)
 if command -v curl >/dev/null 2>&1; then
@@ -621,6 +626,7 @@ if [[ "${OE_RUN_MODE}" == "evolve" ]]; then
   log "  OE_INITIAL=${OE_INITIAL}"
   log "  OE_EVAL=${OE_EVAL}"
   log "  OE_ITERATIONS=${OE_ITERATIONS}"
+  log "  EVAL_PERSIST_CHANGES=${EVAL_PERSIST_CHANGES}"
 
   exec openevolve-run "${OE_INITIAL}" "${OE_EVAL}" \
     ${OE_ITERATIONS:+--iterations "$OE_ITERATIONS"} \

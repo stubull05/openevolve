@@ -87,6 +87,16 @@ def _worker_init(config_dict: dict, evaluation_file: str) -> None:
     _worker_prompt_sampler = None
 
 
+allowed_files = [p.strip() for p in os.getenv("OE_ALLOWED_FILES", "api.py,data_layer.py").split(",") if p.strip()]
+default_target = os.getenv("OE_TARGET_FILE", "api.py")
+
+sanitized_patch = extract_raw_patch(llm_response, allowed_targets=allowed_files, default_target=default_target)
+if sanitized_patch:
+    logger.info("Using sanitized patch (len=%d)", len(sanitized_patch))
+    llm_response = sanitized_patch
+else:
+    logger.warning("Sanitizer could not construct a valid patch; evolution will likely skip this iteration.")
+    
 def _lazy_init_worker_components():
     """Lazily initialize expensive components on first use"""
     global _worker_evaluator
