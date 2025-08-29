@@ -2,25 +2,13 @@
 """
 Robust sanitizer: converts model output to a valid unified diff for ONE target file.
 
-Fixes:
-- strip ``` fences & git headers (diff --git, index, file mode, similarity index…)
-- repair malformed hunk tails ('@...' -> '@@')
-- coerce stray lines IN HUNKS to context (' ' prefix)
-- retarget filenames to OE_TARGET_FILE (default 'api.py')
-- enforce OE_ALLOWED_FILES allowlist
-- normalize Unicode (BOM/ZWSP/NBSP/unicode minus) + line endings
-- select the best fenced block if multiple are present
-- return '' when there are no hunks or no +/- lines (so caller re-prompts safely)
-
-Env (optional):
-  OE_TARGET_FILE     default: api.py
-  OE_ALLOWED_FILES   default: "<OE_TARGET_FILE>,data_layer.py"
-  OE_PATCH_MAX_LINES default: 5000
+This version specifically handles the common case where models generate patches for
+'api.py' but the target file is 'api.py', and ensures proper diff format.
 """
 
 from __future__ import annotations
 import os, re, sys
-from typing import Iterable, List
+from typing import List
 
 TARGET = (os.environ.get("OE_TARGET_FILE") or "api.py").strip() or "api.py"
 _ALLOWED = {
@@ -32,271 +20,210 @@ try:
 except Exception:
     MAX_LINES = 5000
 
-# --- unicode & line-ending normalization ---
-_RE_BOM = re.compile(r"^\ufeff")
-_RE_ZW  = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
-_RE_NB  = re.compile(r"[\u00a0\u202f]")
-_RE_UM  = re.compile(r"[\u2212]")  # unicode minus
 def _normalize_text(s: str) -> str:
+    """Normalize unicode and line endings"""
     if not s:
         return s
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = _RE_BOM.sub("", s)
-    s = _RE_ZW.sub("", s)
-    s = _RE_NB.sub(" ", s)
-    s = _RE_UM.sub("-", s)
+    # Remove BOM and zero-width chars
+    s = re.sub(r"[\ufeff\u200b\u200c\u200d\u2060]", "", s)
+    # Replace unicode spaces and minus
+    s = re.sub(r"[\u00a0\u202f]", " ", s)
+    s = re.sub(r"[\u2212]", "-", s)
     return s
 
-# --- patterns ---
-_RE_FENCE_BLOCKS = re.compile(r"```(?P<tag>\w+)?\s*(?P<body>.*?)```", re.S | re.I)
-_RE_GIT_HDRS     = (
-    re.compile(r"^diff --git .*$", re.I),
-    re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$", re.I),
-    re.compile(r"^(?:new|deleted) file mode \d+$", re.I),
-    re.compile(r"^similarity index \d+%$", re.I),
-    re.compile(r"^rename (?:from|to) .+$", re.I),
-)
-_RE_OLD = re.compile(r"^---\s+(.*)$")
-_RE_NEW = re.compile(r"^\+\+\+\s+(.*)$")
-_RE_VALID_HUNK = re.compile(r"^@@\s*-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@(?:\s.*)?$")
-# malformed tails like '@...' → make '@@'
-_RE_FIX_HUNK = re.compile(r"^@@\s*-(\d+(?:,\d+)?)\s+\+(\d+(?:,\d+)?)\s*@.*$")
+def _extract_from_fences(text: str) -> str:
+    """Extract diff content from markdown code fences"""
+    # Look for ```diff, ```patch, or plain ``` blocks
+    patterns = [
+        r"```(?:diff|patch)\s*\n(.*?)```",
+        r"```\s*\n(.*?)```"
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+        if matches:
+            # Return the largest match (likely the main diff)
+            return max(matches, key=len)
+    
+    return text
 
-def _choose_best_block(text: str) -> str:
-    """
-    If multiple fenced blocks exist, pick the one most likely to be a diff.
-    Preference order: tag is 'diff'/'patch', highest presence of diff tokens.
-    """
-    blocks = list(_RE_FENCE_BLOCKS.finditer(text))
-    if not blocks:
-        return text
-    scored = []
-    for m in blocks:
-        tag = (m.group("tag") or "").lower()
-        body = m.group("body") or ""
-        score = 0
-        if tag in {"diff","patch"}:
-            score += 5
-        # token counts
-        tokens = ("--- ", "+++ ", "@@ ", "diff --git", "\n+","\n-","index ")
-        score += sum(body.count(t) for t in tokens)
-        scored.append((score, body))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+def _remove_git_headers(lines: List[str]) -> List[str]:
+    """Remove git headers that confuse patch application"""
+    git_patterns = [
+        r"^diff --git ",
+        r"^index [0-9a-f]+\.\.[0-9a-f]+",
+        r"^(?:new|deleted) file mode ",
+        r"^similarity index ",
+        r"^rename (?:from|to) "
+    ]
+    
+    filtered = []
+    for line in lines:
+        if not any(re.match(pattern, line, re.IGNORECASE) for pattern in git_patterns):
+            filtered.append(line)
+    
+    return filtered
 
-def _strip_git_headers(lines: Iterable[str]) -> List[str]:
-    out: List[str] = []
-    for ln in lines:
-        if any(p.match(ln) for p in _RE_GIT_HDRS):
-            continue
-        out.append(ln)
-    return out
-
-def _retarget_path(path: str) -> str:
-    """Retarget file paths to allowed files, defaulting to TARGET"""
+def _retarget_filename(path: str) -> str:
+    """Map file paths to the target file"""
     path = path.strip()
-    if path.startswith(("a/","b/")):
+    
+    # Remove a/ or b/ prefixes
+    if path.startswith(("a/", "b/")):
         path = path[2:]
-    # Common hallucinations - map to target
-    if path in ("app.py", "main.py", "server.py"):
-        path = TARGET
-    # Only allow files in the allowlist
+    
+    # Common model hallucinations -> map to target
+    common_names = ["api.py", "main.py", "server.py", "application.py"]
+    if path in common_names:
+        return TARGET
+    
+    # Only allow files in the allowed list
     if path not in _ALLOWED:
-        path = TARGET
+        return TARGET
+    
     return path
 
-def _fix_hunk_context(lines: List[str]) -> List[str]:
-    """
-    Ensure hunk lines have proper prefixes and fix common formatting issues.
-    """
-    out: List[str] = []
-    in_hunk = False
+def _fix_file_headers(lines: List[str]) -> List[str]:
+    """Fix and normalize file headers"""
+    fixed = []
     
-    for ln in lines:
-        # File headers and hunk headers end the current hunk context
-        if ln.startswith(("--- ", "+++ ", "@@")) or _RE_VALID_HUNK.match(ln):
-            in_hunk = ln.startswith("@@") or _RE_VALID_HUNK.match(ln)
-            out.append(ln)
-            continue
-            
-        if in_hunk:
-            # Already properly prefixed
-            if ln.startswith(("+", "-", " ")):
-                out.append(ln)
-            # Empty line becomes context
-            elif not ln.strip():
-                out.append(" ")
-            # Non-prefixed line in hunk becomes context  
-            else:
-                out.append(" " + ln)
+    for line in lines:
+        if line.startswith("--- "):
+            # Extract path and retarget it
+            path = _retarget_filename(line[4:])
+            fixed.append(f"--- a/{path}")
+        elif line.startswith("+++ "):
+            # Extract path and retarget it  
+            path = _retarget_filename(line[4:])
+            fixed.append(f"+++ b/{path}")
         else:
-            # Outside hunks, keep as-is (will be filtered later)
-            out.append(ln)
+            fixed.append(line)
     
-    return out
+    return fixed
 
-def _is_valid_diff_line(line: str) -> bool:
-    """Check if a line belongs in a unified diff"""
-    if not line:
-        return True  # Empty lines are OK
+def _fix_hunk_headers(lines: List[str]) -> List[str]:
+    """Fix malformed hunk headers"""
+    fixed = []
     
-    # File headers
-    if line.startswith(("--- a/", "+++ b/")):
-        return True
-        
-    # Hunk headers
-    if _RE_VALID_HUNK.match(line):
-        return True
-        
-    # Hunk content
-    if line.startswith(("+", "-", " ")):
-        return True
-        
-    return False
-
-def extract_raw_patch(text: str) -> str:
-    """
-    OpenEvolve calls this to obtain a raw unified diff string.
-    Returns '' when unusable, prompting a safe re-ask upstream.
-    """
-    if not isinstance(text, str) or not text.strip():
-        return ""
-
-    text = _normalize_text(text)
-
-    # Choose the best fenced block if present
-    candidate = _choose_best_block(text)
-    candidate = _normalize_text(candidate)
-
-    # Split into lines and truncate if too long
-    lines = [ln.rstrip() for ln in candidate.split("\n")]
-    if len(lines) > MAX_LINES:
-        lines = lines[:MAX_LINES]
-
-    # Remove git headers that confuse patch
-    lines = _strip_git_headers(lines)
-    
-    if not lines:
-        return ""
-
-    # Fix file headers and retarget paths
-    fixed_lines: List[str] = []
-    has_old_header = False
-    has_new_header = False
-    
-    for ln in lines:
-        # Handle old file header (--- a/file or --- file)
-        mo = _RE_OLD.match(ln)
-        if mo:
-            path = _retarget_path(mo.group(1))
-            fixed_lines.append(f"--- a/{path}")
-            has_old_header = True
-            continue
-            
-        # Handle new file header (+++ b/file or +++ file)  
-        mn = _RE_NEW.match(ln)
-        if mn:
-            path = _retarget_path(mn.group(1))
-            fixed_lines.append(f"+++ b/{path}")
-            has_new_header = True
-            continue
-            
-        # Fix malformed hunk headers
-        if ln.startswith("@@"):
-            mf = _RE_FIX_HUNK.match(ln)
-            if mf:
-                fixed_lines.append(f"@@ -{mf.group(1)} +{mf.group(2)} @@")
-            elif _RE_VALID_HUNK.match(ln):
-                fixed_lines.append(ln)
+    for line in lines:
+        if line.startswith("@@"):
+            # Check if it's already valid
+            if re.match(r"^@@\s*-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@", line):
+                fixed.append(line)
             else:
-                # Try to extract valid hunk info
-                parts = re.findall(r'-(\d+(?:,\d+)?)\s+\+(\d+(?:,\d+)?)', ln)
-                if parts:
-                    fixed_lines.append(f"@@ -{parts[0][0]} +{parts[0][1]} @@")
-                else:
-                    # Skip malformed hunk header
-                    continue
-            continue
-            
-        fixed_lines.append(ln)
-
-    lines = fixed_lines
-
-    # Check if we have hunk content
-    has_hunks = any(ln.startswith("@@") or _RE_VALID_HUNK.match(ln) for ln in lines)
-    has_changes = any(ln.startswith(("+", "-")) for ln in lines)
+                # Try to extract numbers and fix
+                numbers = re.findall(r'-(\d+(?:,\d+)?)\s+\+(\d+(?:,\d+)?)', line)
+                if numbers:
+                    fixed.append(f"@@ -{numbers[0][0]} +{numbers[0][1]} @@")
+                # Skip if can't fix
+        else:
+            fixed.append(line)
     
-    if not has_hunks and not has_changes:
-        return ""
+    return fixed
 
-    # Add missing file headers if we have hunk content
-    if not (has_old_header and has_new_header) and (has_hunks or has_changes):
-        header_lines = []
-        if not has_old_header:
-            header_lines.append(f"--- a/{TARGET}")
-        if not has_new_header:
-            header_lines.append(f"+++ b/{TARGET}")
-        
-        # Insert headers before first non-header line
+def _ensure_proper_headers(lines: List[str]) -> List[str]:
+    """Ensure the patch has proper file headers"""
+    has_old_header = any(line.startswith(f"--- a/{TARGET}") for line in lines)
+    has_new_header = any(line.startswith(f"+++ b/{TARGET}") for line in lines)
+    has_hunks = any(line.startswith("@@") for line in lines)
+    
+    if has_hunks and not (has_old_header and has_new_header):
+        # Find where to insert headers (before first hunk or at start)
         insert_pos = 0
-        for i, ln in enumerate(lines):
-            if not ln.startswith(("--- ", "+++ ")):
+        for i, line in enumerate(lines):
+            if line.startswith("@@"):
                 insert_pos = i
                 break
         
-        lines = lines[:insert_pos] + header_lines + lines[insert_pos:]
+        headers = []
+        if not has_old_header:
+            headers.append(f"--- a/{TARGET}")
+        if not has_new_header:
+            headers.append(f"+++ b/{TARGET}")
+        
+        lines = lines[:insert_pos] + headers + lines[insert_pos:]
+    
+    return lines
 
-    # Fix hunk line formatting
-    lines = _fix_hunk_context(lines)
+def _validate_hunk_content(lines: List[str]) -> List[str]:
+    """Ensure hunk lines have proper prefixes"""
+    validated = []
+    in_hunk = False
+    
+    for line in lines:
+        if line.startswith(("--- a/", "+++ b/")):
+            in_hunk = False
+            validated.append(line)
+        elif line.startswith("@@"):
+            in_hunk = True
+            validated.append(line)
+        elif in_hunk:
+            # Must start with +, -, or space
+            if line.startswith(("+", "-", " ")):
+                validated.append(line)
+            elif not line.strip():
+                # Empty line becomes context
+                validated.append(" ")
+            else:
+                # Add space prefix for context
+                validated.append(" " + line)
+        else:
+            # Outside hunk, only keep diff-related lines
+            if line.startswith(("--- ", "+++ ", "@@")):
+                validated.append(line)
+    
+    return validated
 
-    # Keep only valid diff lines
-    valid_lines = []
-    for ln in lines:
-        if _is_valid_diff_line(ln):
-            valid_lines.append(ln)
-
-    lines = valid_lines
-
-    # Remove trailing empty lines
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    if not lines:
+def extract_raw_patch(text: str) -> str:
+    """
+    Main entry point called by OpenEvolve to sanitize patches.
+    Returns clean unified diff or empty string if unusable.
+    """
+    if not isinstance(text, str) or not text.strip():
+        print("[sanitizer] Empty input text", file=sys.stderr)
         return ""
 
-    # Final assembly
+    # Normalize the text
+    text = _normalize_text(text)
+    
+    # Extract from code fences if present
+    text = _extract_from_fences(text)
+    
+    # Split into lines
+    lines = [line.rstrip() for line in text.splitlines()]
+    
+    if len(lines) > MAX_LINES:
+        lines = lines[:MAX_LINES]
+    
+    if not lines:
+        print("[sanitizer] No lines to process", file=sys.stderr)
+        return ""
+    
+    # Apply fixes in order
+    lines = _remove_git_headers(lines)
+    lines = _fix_file_headers(lines)
+    lines = _fix_hunk_headers(lines)
+    lines = _ensure_proper_headers(lines)
+    lines = _validate_hunk_content(lines)
+    
+    # Final validation
+    has_hunks = any(line.startswith("@@") for line in lines)
+    has_changes = any(line.startswith(("+", "-")) for line in lines)
+    
+    if not (has_hunks and has_changes):
+        print(f"[sanitizer] Invalid patch: hunks={has_hunks}, changes={has_changes}", file=sys.stderr)
+        return ""
+    
+    # Assemble result
     result = "\n".join(lines)
     if not result.endswith("\n"):
         result += "\n"
-
-    # Final validation - must have both hunks and changes
-    final_lines = result.splitlines()
-    has_final_hunks = any(_RE_VALID_HUNK.match(ln) for ln in final_lines)
-    has_final_changes = any(ln.startswith(("+", "-")) for ln in final_lines)
     
-    if not (has_final_hunks and has_final_changes):
-        return ""
-
-    # Ensure proper file headers exist
-    has_proper_headers = (
-        any(ln.startswith(f"--- a/{TARGET}") for ln in final_lines) and
-        any(ln.startswith(f"+++ b/{TARGET}") for ln in final_lines)
-    )
-    
-    if not has_proper_headers:
-        # Prepend proper headers
-        content_lines = [ln for ln in final_lines if not ln.startswith(("--- ", "+++ "))]
-        result = f"--- a/{TARGET}\n+++ b/{TARGET}\n" + "\n".join(content_lines)
-        if not result.endswith("\n"):
-            result += "\n"
-
     # Debug output
-    preview_lines = result.splitlines()[:10]
+    print(f"[sanitizer] Generated patch for {TARGET} ({len(result)} chars)", file=sys.stderr)
+    preview_lines = result.splitlines()[:8]
     preview = "\n".join(preview_lines)
-    if len(result.splitlines()) > 10:
-        preview += "\n... (truncated)"
-    
-    print(f"[sanitizer] Generated patch for {TARGET}:", file=sys.stderr)
     print(f"[sanitizer] Preview:\n{preview}", file=sys.stderr)
-
+    
     return result

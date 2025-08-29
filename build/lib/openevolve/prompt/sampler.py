@@ -519,5 +519,5 @@ def get_repo_context_from_env() -> dict:
     import os
     return {
         "repo_root": os.environ.get("OE_REPO_DIR","/workspace/target"),
-        "target_file": os.environ.get("OE_TARGET_FILE","app.py"),
+        "target_file": os.environ.get("OE_TARGET_FILE","api.py"),
     }

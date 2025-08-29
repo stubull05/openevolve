@@ -3,7 +3,7 @@
 Robust sanitizer: converts model output to a valid unified diff for ONE target file.
 
 This version specifically handles the common case where models generate patches for
-'app.py' but the target file is 'api.py', and ensures proper diff format.
+'api.py' but the target file is 'api.py', and ensures proper diff format.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _retarget_filename(path: str) -> str:
         path = path[2:]
     
     # Common model hallucinations -> map to target
-    common_names = ["app.py", "main.py", "server.py", "application.py"]
+    common_names = ["api.py", "main.py", "server.py", "application.py"]
     if path in common_names:
         return TARGET
     

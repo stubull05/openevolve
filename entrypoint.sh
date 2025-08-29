@@ -35,7 +35,7 @@ def _retarget_file(path: str) -> str:
     if path.startswith(("a/","b/")):
         path = path[2:]
     # Common model hallucinations
-    if path in ("app.py", "main.py", "server.py"):
+    if path in ("api.py", "main.py", "server.py"):
         path = TARGET
     if path not in ALLOWED:
         path = TARGET
