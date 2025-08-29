@@ -11,102 +11,338 @@ export PYTHONPATH="/workspace/target:/workspace:${PYTHONPATH:-}"
 echo "/workspace"        >  "${VIRTUAL_ENV:-/workspace/.venv}/lib/python3.13/site-packages/_workspace.pth" 2>/dev/null || true
 echo "/workspace/target" >> "${VIRTUAL_ENV:-/workspace/.venv}/lib/python3.13/site-packages/_workspace.pth" 2>/dev/null || true
 
-
+# 3) Apply improved patch sanitizer and test fixes
 python - <<'PY'
-import importlib, os, re, sys
+import importlib, os, re, sys, subprocess
+from pathlib import Path
 
 TARGET = (os.environ.get("OE_TARGET_FILE") or "api.py").strip() or "api.py"
 ALLOWED = set(x for x in (os.environ.get("OE_ALLOWED_FILES") or f"{TARGET},data_layer.py").replace(" ","").split(",") if x)
 
-ZW = "[\u200b\u200c\u200d\u2060\ufeff]"      # zero-width + BOM
-NBSP = "[\u00a0\u202f]"                       # nbsp / narrow nbsp
-UMINUS = "[\u2212]"                            # unicode minus
-
-def _clean(s: str) -> str:
-    s = re.sub(ZW, "", s)
-    s = re.sub(NBSP, " ", s)
-    s = re.sub(UMINUS, "-", s)
+def _clean_unicode(s: str) -> str:
+    """Remove problematic unicode characters"""
+    if not s:
+        return s
+    # Remove zero-width chars, BOM, replace unicode spaces/minus
+    s = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", s)
+    s = re.sub(r"[\u00a0\u202f]", " ", s)
+    s = re.sub(r"[\u2212]", "-", s)
     return s
 
-HDR_OLD = re.compile(r"^---\s+(.*)$")
-HDR_NEW = re.compile(r"^\+\+\+\s+(.*)$")
-HUNK_OK = re.compile(r"^@@\s*-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@(?:\s.*)?$")
-HUNK_FIX = re.compile(r"^(@@)\s*-(\d+(?:,\d+)?)\s+\+(\d+(?:,\d+)?)\s+@.*$")  # '@...' → '@@'
-
-def _retarget(path: str) -> str:
-    if path.startswith(("a/","b/")): path = path[2:]
-    if path == "app.py": path = TARGET
-    if path not in ALLOWED: path = TARGET
+def _retarget_file(path: str) -> str:
+    """Map file paths to allowed files"""
+    path = path.strip()
+    if path.startswith(("a/","b/")):
+        path = path[2:]
+    # Common model hallucinations
+    if path in ("app.py", "main.py", "server.py"):
+        path = TARGET
+    if path not in ALLOWED:
+        path = TARGET
     return path
 
-def _sanitize(text: str) -> str:
+def _validate_python_syntax(file_path: str) -> tuple[bool, str]:
+    """Check if a Python file has valid syntax"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+        
+        # Try to compile the source
+        compile(source, file_path, 'exec')
+        return True, ""
+    except SyntaxError as e:
+        return False, f"Syntax error at line {e.lineno}: {e.msg}"
+    except Exception as e:
+        return False, f"Error reading/compiling {file_path}: {e}"
+
+def _fix_common_syntax_issues(file_path: str) -> bool:
+    """Apply common fixes to Python syntax issues"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        original_content = content
+        
+        # Fix common issues
+        # 1. Remove duplicate imports
+        import_lines = []
+        other_lines = []
+        seen_imports = set()
+        
+        for line in content.splitlines():
+            if line.strip().startswith(('import ', 'from ')):
+                if line.strip() not in seen_imports:
+                    seen_imports.add(line.strip())
+                    import_lines.append(line)
+            else:
+                other_lines.append(line)
+        
+        # 2. Fix common indentation issues
+        fixed_lines = []
+        for line in import_lines + other_lines:
+            # Fix mixed tabs/spaces (convert tabs to 4 spaces)
+            line = line.expandtabs(4)
+            fixed_lines.append(line)
+        
+        content = '\n'.join(fixed_lines)
+        
+        # 3. Ensure file ends with newline
+        if content and not content.endswith('\n'):
+            content += '\n'
+        
+        # Only write if we made changes
+        if content != original_content:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"[entrypoint] Fixed syntax issues in {file_path}")
+            return True
+        
+        return False
+    except Exception as e:
+        print(f"[entrypoint] Error fixing syntax in {file_path}: {e}")
+        return False
+
+def _sanitize_patch(text: str) -> str:
+    """Clean and validate a patch to ensure it applies correctly"""
     if not isinstance(text, str) or not text.strip():
         return ""
-    text = _clean(text)
-
-    # strip code fences
-    m = re.search(r"```(?:diff|patch)?(.*?)```", text, flags=re.S|re.I)
-    if m:
-        text = m.group(1)
-
-    lines = [ln.rstrip("\r") for ln in text.strip().splitlines()]
-
-    # drop git headers
-    lines = [ln for ln in lines if not (ln.startswith("diff --git") or ln.startswith("index "))]
-
-    # rewrite headers + repair hunk tails
-    had_old = any(ln.startswith("--- ") for ln in lines)
-    had_new = any(ln.startswith("+++ ") for ln in lines)
-    fixed = []
-    for ln in lines:
-        mo = HDR_OLD.match(ln)
-        if mo:
-            fixed.append(f"--- a/{_retarget(mo.group(1).strip())}")
+    
+    text = _clean_unicode(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    
+    # Extract from fenced blocks
+    fence_match = re.search(r"```(?:diff|patch)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1)
+    
+    lines = [line.rstrip() for line in text.splitlines()]
+    
+    # Remove git headers that confuse patch
+    git_header_patterns = [
+        r"^diff --git ",
+        r"^index [0-9a-f]+\.\.[0-9a-f]+",
+        r"^(?:new|deleted) file mode ",
+        r"^similarity index ",
+        r"^rename (?:from|to) "
+    ]
+    
+    filtered_lines = []
+    for line in lines:
+        if any(re.match(pattern, line) for pattern in git_header_patterns):
             continue
-        mn = HDR_NEW.match(ln)
-        if mn:
-            fixed.append(f"+++ b/{_retarget(mn.group(1).strip())}")
-            continue
-        mf = HUNK_FIX.match(ln)
-        if mf:
-            fixed.append(f"@@ -{mf.group(2)} +{mf.group(3)} @@")
-            continue
-        fixed.append(ln)
-    lines = fixed
+        filtered_lines.append(line)
+    
+    lines = filtered_lines
+    
+    # Fix headers and retarget files
+    fixed_lines = []
+    for line in lines:
+        if line.startswith("--- "):
+            path = _retarget_file(line[4:])
+            fixed_lines.append(f"--- a/{path}")
+        elif line.startswith("+++ "):
+            path = _retarget_file(line[4:])
+            fixed_lines.append(f"+++ b/{path}")
+        elif line.startswith("@@") and not re.match(r"^@@\s*-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@", line):
+            # Fix malformed hunk headers
+            numbers = re.findall(r'-(\d+(?:,\d+)?)\s+\+(\d+(?:,\d+)?)', line)
+            if numbers:
+                fixed_lines.append(f"@@ -{numbers[0][0]} +{numbers[0][1]} @@")
+            else:
+                # Skip malformed hunk
+                continue
+        else:
+            fixed_lines.append(line)
+    
+    lines = fixed_lines
+    
+    # Ensure we have proper headers
+    has_old = any(line.startswith("--- a/") for line in lines)
+    has_new = any(line.startswith("+++ b/") for line in lines)
+    has_hunks = any(line.startswith("@@") for line in lines)
+    has_changes = any(line.startswith(("+", "-")) for line in lines)
+    
+    if not (has_hunks and has_changes):
+        return ""  # No valid diff content
+    
+    if not (has_old and has_new):
+        # Add missing headers
+        header_lines = []
+        if not has_old:
+            header_lines.append(f"--- a/{TARGET}")
+        if not has_new:
+            header_lines.append(f"+++ b/{TARGET}")
+        
+        # Insert at the beginning or before first hunk
+        insert_pos = 0
+        for i, line in enumerate(lines):
+            if line.startswith("@@"):
+                insert_pos = i
+                break
+        
+        lines = lines[:insert_pos] + header_lines + lines[insert_pos:]
+    
+    # Ensure hunk lines are properly formatted
+    in_hunk = False
+    validated_lines = []
+    
+    for line in lines:
+        if line.startswith(("--- a/", "+++ b/")):
+            in_hunk = False
+            validated_lines.append(line)
+        elif line.startswith("@@"):
+            in_hunk = True
+            validated_lines.append(line)
+        elif in_hunk:
+            if line.startswith(("+", "-", " ")):
+                validated_lines.append(line)
+            elif not line.strip():
+                validated_lines.append(" ")  # Empty line becomes context
+            else:
+                validated_lines.append(" " + line)  # Non-prefixed becomes context
+        else:
+            # Outside hunk, only keep headers/hunks
+            if line.startswith(("--- ", "+++ ", "@@")):
+                validated_lines.append(line)
+    
+    result = "\n".join(validated_lines).strip()
+    if not result:
+        return ""
+    
+    if not result.endswith("\n"):
+        result += "\n"
+    
+    # Final validation
+    final_lines = result.splitlines()
+    if not any(line.startswith("@@") for line in final_lines):
+        return ""
+    if not any(line.startswith(("+", "-")) for line in final_lines):
+        return ""
+    
+    return result
 
-    # keep only diff-relevant lines
-    kept = []
-    for ln in lines:
-        if ln.startswith(("--- a/","+++ b/")) or HUNK_OK.match(ln) or ln[:1] in {"+","-"," "}:
-            kept.append(ln)
-    lines = kept
-
-    # inject headers if missing but hunks exist
-    if not (any(l.startswith("--- a/") for l in lines) and any(l.startswith("+++ b/") for l in lines)):
-        if any(l.startswith("@@ ") or HUNK_OK.match(l) for l in lines):
-            lines = [f"--- a/{TARGET}", f"+++ b/{TARGET}"] + lines
-
-    out = "\n".join(lines).strip()
-    if "@@" not in out or not any(l.startswith(("+","-")) for l in lines):
-        return ""  # no actual changes
-    if not out.endswith("\n"):
-        out += "\n"
-    # short preview
-    print("[entrypoint] sanitized patch preview:\n" + "\n".join(out.splitlines()[:8]), file=sys.stderr)
-    return out
+# Check and fix syntax issues in target file
+target_file = Path(os.environ.get("OE_REPO_DIR", "/workspace/target")) / TARGET
+if target_file.exists():
+    valid, error = _validate_python_syntax(str(target_file))
+    if not valid:
+        print(f"[entrypoint] Syntax error in {target_file}: {error}")
+        if _fix_common_syntax_issues(str(target_file)):
+            # Check again after fixes
+            valid, error = _validate_python_syntax(str(target_file))
+            if valid:
+                print(f"[entrypoint] Successfully fixed syntax issues in {target_file}")
+            else:
+                print(f"[entrypoint] Could not fix syntax issues in {target_file}: {error}")
+        else:
+            print(f"[entrypoint] No automatic fixes available for {target_file}")
+    else:
+        print(f"[entrypoint] {target_file} has valid Python syntax")
 
 try:
     ps = importlib.import_module("openevolve.utils.patch_sanitizer")
-    orig = getattr(ps, "extract_raw_patch", None)
-    def extract_raw_patch(text: str) -> str:
-        cleaned = _sanitize(text)
-        return cleaned if cleaned else (orig(text) if callable(orig) else "")
-    ps.extract_raw_patch = extract_raw_patch
-    print("[entrypoint] Patched patch_sanitizer.extract_raw_patch", file=sys.stderr)
+    original_extract = getattr(ps, "extract_raw_patch", None)
+    
+    def patched_extract_raw_patch(text: str) -> str:
+        result = _sanitize_patch(text)
+        if result:
+            print(f"[entrypoint] Sanitized patch ({len(result)} chars)", file=sys.stderr)
+            preview = "\n".join(result.splitlines()[:8])
+            print(f"[entrypoint] Preview:\n{preview}", file=sys.stderr)
+        else:
+            print("[entrypoint] Failed to sanitize patch", file=sys.stderr)
+        return result
+    
+    ps.extract_raw_patch = patched_extract_raw_patch
+    print("[entrypoint] Applied improved patch sanitizer", file=sys.stderr)
+    
 except Exception as e:
-    print(f"[entrypoint] WARNING: sanitizer patch failed: {e}", file=sys.stderr)
-PY
+    print(f"[entrypoint] WARNING: Failed to patch sanitizer: {e}", file=sys.stderr)
 
+# Create a test helper module to improve import reliability
+test_helper_content = '''
+"""
+Test helper module to improve import reliability and provide common test utilities.
+"""
+import sys
+import os
+from pathlib import Path
+
+# Ensure target directory is in path
+target_dir = Path("/workspace/target")
+if str(target_dir) not in sys.path:
+    sys.path.insert(0, str(target_dir))
+
+def safe_import_api():
+    """Safely import the api module with better error handling"""
+    try:
+        # First try direct import
+        import api
+        return api
+    except ImportError as e:
+        print(f"Import error: {e}")
+        # Try adding current directory to path
+        current_dir = Path.cwd()
+        if str(current_dir) not in sys.path:
+            sys.path.insert(0, str(current_dir))
+        try:
+            import api
+            return api
+        except ImportError:
+            # Try importing from target directory explicitly
+            target_api = target_dir / "api.py"
+            if target_api.exists():
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("api", target_api)
+                if spec and spec.loader:
+                    api = importlib.util.module_from_spec(spec)
+                    sys.modules["api"] = api
+                    spec.loader.exec_module(api)
+                    return api
+            raise
+    except SyntaxError as e:
+        print(f"Syntax error in api.py: {e}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error importing api: {e}")
+        raise
+
+def validate_api_module():
+    """Validate that the api module can be imported and has expected attributes"""
+    try:
+        api = safe_import_api()
+        
+        # Check for common Flask app attributes
+        required_attrs = ['app']
+        missing_attrs = [attr for attr in required_attrs if not hasattr(api, attr)]
+        
+        if missing_attrs:
+            print(f"Warning: api module missing attributes: {missing_attrs}")
+            return False, f"Missing attributes: {missing_attrs}"
+        
+        return True, "API module validation passed"
+    except Exception as e:
+        return False, f"API module validation failed: {e}"
+
+# Auto-validate when imported
+if __name__ != "__main__":
+    try:
+        is_valid, message = validate_api_module()
+        if not is_valid:
+            print(f"[test_helper] {message}")
+    except Exception as e:
+        print(f"[test_helper] Validation error: {e}")
+'''
+
+# Write the test helper
+try:
+    helper_path = Path("/workspace/target/test_helper.py")
+    helper_path.write_text(test_helper_content, encoding="utf-8")
+    print(f"[entrypoint] Created test helper at {helper_path}")
+except Exception as e:
+    print(f"[entrypoint] WARNING: Could not create test helper: {e}")
+
+PY
 
 # Make repo + target importable for pytest/subprocesses
 export PYTHONPATH="/workspace/target:/workspace:${PYTHONPATH:-}"
@@ -177,7 +413,6 @@ fi
 log "[entrypoint] Activating virtualenv at /workspace/.venv"
 # shellcheck disable=SC1091
 source /workspace/.venv/bin/activate
-
 
 # Persist import paths for all Python children via .pth markers
 python - <<'PY'
@@ -306,14 +541,70 @@ else:
 PY
 
 # -----------------------------------------------------------------------------
-# 7) If a command was provided, run it directly
+# 7) Test environment validation and fixes
+# -----------------------------------------------------------------------------
+log "[entrypoint] Validating test environment…"
+
+# Test that we can import the target module
+python - <<'PY'
+import sys
+from pathlib import Path
+
+# Add target directory to Python path
+target_dir = Path("/workspace/target")
+if str(target_dir) not in sys.path:
+    sys.path.insert(0, str(target_dir))
+
+try:
+    import api
+    print("[entrypoint] Successfully imported api module")
+    
+    # Check if it has expected Flask app
+    if hasattr(api, 'app'):
+        print("[entrypoint] Found Flask app in api module")
+    else:
+        print("[entrypoint] WARNING: No 'app' attribute found in api module")
+        
+except ImportError as e:
+    print(f"[entrypoint] ERROR: Cannot import api module: {e}")
+    
+except SyntaxError as e:
+    print(f"[entrypoint] ERROR: Syntax error in api module: {e}")
+    
+except Exception as e:
+    print(f"[entrypoint] ERROR: Unexpected error importing api: {e}")
+
+# Check if tests directory exists and is properly structured
+test_dir = target_dir / "tests"
+if test_dir.exists():
+    print(f"[entrypoint] Found tests directory: {test_dir}")
+    
+    # Look for test files
+    test_files = list(test_dir.rglob("test_*.py"))
+    print(f"[entrypoint] Found {len(test_files)} test files")
+    
+    # Check if tests can access the api module
+    for test_file in test_files[:3]:  # Check first few test files
+        try:
+            with open(test_file, 'r') as f:
+                content = f.read()
+                if 'import api' in content or 'importlib.import_module("api")' in content:
+                    print(f"[entrypoint] {test_file.name} imports api module")
+        except Exception as e:
+            print(f"[entrypoint] Could not read {test_file}: {e}")
+else:
+    print(f"[entrypoint] WARNING: No tests directory found at {test_dir}")
+PY
+
+# -----------------------------------------------------------------------------
+# 8) If a command was provided, run it directly
 # -----------------------------------------------------------------------------
 if [[ "$#" -gt 0 ]]; then
   exec "$@"
 fi
 
 # -----------------------------------------------------------------------------
-# 8) Run mode
+# 9) Run mode
 # -----------------------------------------------------------------------------
 if [[ "${OE_RUN_MODE}" == "evolve" ]]; then
   : "${OE_INITIAL:=${OE_REPO_DIR}/${OE_TARGET_FILE}}"
@@ -344,74 +635,8 @@ if [[ "${OE_RUN_MODE}" == "pytest" ]]; then
   TEST_PATH="${OE_REPO_DIR}/tests"
   [[ -d "$TEST_PATH" ]] || die "pytest mode requested but ${TEST_PATH} not found."
   log "[entrypoint] Running PYTEST at ${TEST_PATH}…"
-  exec pytest -q "$TEST_PATH"
+  exec pytest -v "$TEST_PATH"  # Use -v for more verbose output to debug issues
 fi
 
 log "[entrypoint] No run requested (OE_RUN_MODE=${OE_RUN_MODE}); idling."
 exec tail -f /dev/null
-
-python - <<'PY'
-import importlib, os, re
-
-TARGET = (os.environ.get("OE_TARGET_FILE") or "api.py").strip() or "api.py"
-ALLOWED = set(
-    x for x in (os.environ.get("OE_ALLOWED_FILES") or f"{TARGET},data_layer.py")
-    .replace(" ", "")
-    .split(",") if x
-)
-
-def _sanitize(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    # strip code fences
-    m = re.search(r"```(?:diff|patch)?(.*?)```", text, flags=re.S|re.I)
-    if m:
-        text = m.group(1)
-    lines = [ln.rstrip("\r") for ln in text.strip().splitlines()]
-
-    # drop git headers that confuse patch apply
-    lines = [ln for ln in lines if not (ln.startswith("diff --git") or ln.startswith("index "))]
-
-    def _retarget(p: str) -> str:
-        if p.startswith(("a/","b/")): p = p[2:]
-        if p == "app.py": p = TARGET
-        if p not in ALLOWED: p = TARGET
-        return p
-
-    # rewrite headers if present
-    has_old = any(ln.startswith("--- ") for ln in lines)
-    has_new = any(ln.startswith("+++ ") for ln in lines)
-    new = []
-    for ln in lines:
-        if ln.startswith("--- "):
-            new.append(f"--- a/{_retarget(ln[4:].strip())}")
-        elif ln.startswith("+++ "):
-            new.append(f"+++ b/{_retarget(ln[4:].strip())}")
-        else:
-            new.append(ln)
-    lines = new
-
-    # inject headers if missing but hunks exist
-    if not (has_old and has_new) and any(ln.startswith("@@") for ln in lines):
-        lines = [f"--- a/{TARGET}", f"+++ b/{TARGET}"] + lines
-
-    out = "\n".join(lines).strip()
-    if "@@" not in out:
-        return ""
-    if not out.endswith("\n"):
-        out += "\n"
-    return out
-
-try:
-    ps = importlib.import_module("openevolve.utils.patch_sanitizer")
-    _orig = getattr(ps, "extract_raw_patch", None)
-
-    def extract_raw_patch(text: str) -> str:
-        cleaned = _sanitize(text)
-        return cleaned if cleaned else (_orig(text) if callable(_orig) else "")
-
-    ps.extract_raw_patch = extract_raw_patch  # hot-patch
-    print("[entrypoint] Patched patch_sanitizer.extract_raw_patch to normalize diffs")
-except Exception as e:
-    print(f"[entrypoint] WARNING: could not patch sanitizer: {e}")
-PY

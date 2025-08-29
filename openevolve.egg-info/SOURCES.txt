@@ -31,6 +31,7 @@ openevolve/utils/__init__.py
 openevolve/utils/async_utils.py
 openevolve/utils/code_utils.py
 openevolve/utils/diff_parser.py
+openevolve/utils/docker_patch_manager.py
 openevolve/utils/format_utils.py
 openevolve/utils/metrics_utils.py
 openevolve/utils/patch_sanitizer.py
