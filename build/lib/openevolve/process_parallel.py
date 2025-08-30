@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, Future
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
-
+from openevolve.utils.code_utils import extract_diffs, apply_diff, format_diff_summary
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
 
@@ -28,27 +28,25 @@ except Exception:  # pragma: no cover
         return ""
 
 def _sanitize_llm_patch(raw: str) -> str:
-    """
-    Normalize a model-produced patch/diff so the rest of the pipeline can apply it.
-    - Retargets hallucinated paths to allowed targets (api.py/data_layer.py)
-    - Accepts both old/new extract_raw_patch signatures
-    """
+    """Normalize a model-produced diff so the rest of the pipeline can apply it."""
     allowed_files = [
-        p.strip() for p in os.getenv("OE_ALLOWED_FILES", "api.py,data_layer.py").split(",") if p.strip()
+        p.strip()
+        for p in os.getenv("OE_ALLOWED_FILES", "api.py,data_layer.py").split(",")
+        if p.strip()
     ]
     default_target = os.getenv("OE_TARGET_FILE", "api.py")
 
-    # Try new signature first, then fallback to legacy.
     try:
+        # Try new signature first, then fallback to legacy.
         patched = _extract_raw_patch(
             raw,
-            allowed_targets=allowed_files,           # newer sanitizer supports these
+            allowed_targets=allowed_files,
             default_target=default_target,
         )
     except TypeError:
         patched = _extract_raw_patch(raw)
 
-    return (patched or "").strip()
+    return (patched or raw).strip()
 
 # --- Worker payloads ---------------------------------------------------------
 @dataclass
@@ -182,12 +180,11 @@ def _run_iteration_worker(
 
             sanitized = _sanitize_llm_patch(raw)
             if sanitized:
-                llm_response = sanitized  # use sanitized diff
+                llm_response = sanitized if sanitized else raw
             else:
                 # keep raw so the evaluator logs show the original content
                 logger.warning("Sanitizer returned empty; proceeding with raw diff response")
 
-            from openevolve.utils.code_utils import extract_diffs, apply_diff, format_diff_summary
 
             diff_blocks = extract_diffs(llm_response)
             if not diff_blocks:

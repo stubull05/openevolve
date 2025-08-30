@@ -3,10 +3,16 @@ Robust sanitizer for OpenEvolve
 --------------------------------
 
 This module converts arbitrary LLM output into a unified diff that
-applies cleanly to exactly one target file.  The default target is
-``api.py``, but this can be overridden at runtime via the
-``OE_TARGET_FILE`` environment variable.  Similarly, an allow‑list of
-permitted files can be set via ``OE_ALLOWED_FILES`` (comma separated).
+applies cleanly to exactly one target file.  The target file is
+determined at runtime: if ``OE_TARGET_FILE`` is set it will be used;
+otherwise, if ``OE_ALLOWED_FILES`` is provided, the first file in that
+list will be used; as a last resort the fallback target is
+``api.py`` for backwards compatibility.  An allow‑list of permitted
+files can be set via ``OE_ALLOWED_FILES`` (comma separated).  If not
+provided, the allow‑list defaults to the target file plus a
+conventional secondary module (``data_layer.py``).  Users should
+explicitly set ``OE_TARGET_FILE`` when evolving non‑Python targets
+such as JavaScript or TypeScript files to avoid hard‑coded defaults.
 
 The sanitizer performs the following steps:
 
@@ -22,9 +28,10 @@ The sanitizer performs the following steps:
   and file mode lines are stripped completely.  These confuse the
   unified diff parser used downstream.
 * File names referenced in ``---``/``+++`` headers are retargeted to
-  the configured target file.  If the model tries to patch ``app.py``
-  or any other file not in the allow‑list, it will be rewritten to the
-  target.
+  the configured target file.  If the model tries to patch ``app``
+  with the same extension (for example ``app.js`` when the target is
+  ``main.js``) or any file not in the allow‑list, it will be rewritten
+  to the target.
 * Malformed hunk tails such as ``@@ -1,2 +1,3 @...`` are repaired by
   replacing the trailing ``@...`` with ``@@``.  A valid hunk header must
   look like ``@@ -start,length +start,length @@``.
@@ -57,10 +64,37 @@ from typing import Iterable, List
 __all__ = ["extract_raw_patch"]
 
 # Determine the target file and allow‑list from environment variables.
-TARGET: str = (os.environ.get("OE_TARGET_FILE") or "api.py").strip() or "api.py"
-_ALLOWED: set[str] = {
-    x.strip() for x in (os.environ.get("OE_ALLOWED_FILES") or f"{TARGET},data_layer.py").split(",") if x.strip()
-}
+#
+# OpenEvolve supports evolving programs written in various languages (Python,
+# JavaScript, TypeScript, etc.).  To avoid hard‑coding a single file name,
+# the sanitizer determines the target file in the following order:
+# 1.  If ``OE_TARGET_FILE`` is set in the environment, use its value.
+# 2.  Otherwise, if ``OE_ALLOWED_FILES`` is set, take the first file in
+#     that comma‑separated list as the target.
+# 3.  Finally, fall back to ``api.py`` for backwards compatibility.  This
+#     fallback is only used when neither environment variable is provided.
+
+env_target = os.environ.get("OE_TARGET_FILE")
+env_allowed = [x.strip() for x in (os.environ.get("OE_ALLOWED_FILES") or "").split(",") if x.strip()]
+
+if env_target:
+    TARGET: str = env_target.strip()
+elif env_allowed:
+    # Use the first allowed file as the default target if none specified.
+    TARGET = env_allowed[0]
+else:
+    # Last resort fallback.  Do not remove this fallback entirely to avoid
+    # breaking existing deployments that rely on the default.  Users are
+    # encouraged to set OE_TARGET_FILE for non‑Python targets.
+    TARGET = "api.py"
+
+# Build the allow‑list.  If OE_ALLOWED_FILES is provided, use that.
+# Otherwise default to the target file plus a conventional secondary module.
+if env_allowed:
+    _ALLOWED: set[str] = set(env_allowed)
+else:
+    _ALLOWED = {TARGET, "data_layer.py"}
+
 try:
     MAX_LINES: int = int(os.environ.get("OE_PATCH_MAX_LINES", "5000"))
 except Exception:
@@ -154,16 +188,29 @@ def _strip_git_headers(lines: Iterable[str]) -> List[str]:
     return out
 
 def _retarget_path(path: str) -> str:
-    """Map file paths to the allowed target file.
+    """Map arbitrary file paths to the configured target file.
 
-    Removes leading ``a/`` or ``b/``.  If the path is ``app.py`` or
-    another file not in the allow‑list, it becomes ``TARGET``.
+    This function first removes any Git prefix (``a/`` or ``b/``), then
+    normalizes the filename with respect to the configured target.
+
+    A common failure mode when working with large language models is
+    that they generate diffs for ``app.py`` regardless of the actual
+    file being evolved.  We generalize this by examining the file
+    extension of the ``TARGET`` file; if the candidate path is
+    ``app`` with the same extension (e.g. ``app.ts`` when the target
+    is ``main.ts``), we retarget it to ``TARGET``.  Any file not
+    present in the allow‑list is also rewritten to ``TARGET``.
     """
     path = path.strip()
+    # Strip Git path prefixes
     if path.startswith(("a/", "b/")):
         path = path[2:]
-    if path == "app.py":
+    # Determine the extension of the target file
+    ext = os.path.splitext(TARGET)[1]
+    # If the model tries to patch app.<ext>, map it to our target
+    if path == f"app{ext}":
         path = TARGET
+    # If the path is not allowed, map it to our target
     if path not in _ALLOWED:
         path = TARGET
     return path
